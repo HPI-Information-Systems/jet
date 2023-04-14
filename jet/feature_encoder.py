@@ -6,6 +6,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import VarianceThreshold
+import warnings
 
 from tsfresh.feature_extraction import extract_features
 
@@ -22,6 +23,7 @@ class FeatureEncoder(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: List[np.ndarray]) -> np.ndarray:
+        X = self._validate_input(X)
         features = self._extract_features(X)
         return features.values
 
@@ -31,33 +33,48 @@ class FeatureEncoder(BaseEstimator, TransformerMixin):
         return self.fit(X, y).transform(X)
 
     def _extract_features(self, data: List[np.ndarray]) -> pd.DataFrame:
+        feats: Optional[pd.DataFrame] = None
+        for d in range(data[0].shape[1]):
+            univar_feats = self._extract_features_univariate([x[:, d] for x in data])
+            if feats is None:
+                feats = univar_feats
+            else:
+                feats = feats.join(univar_feats, rsuffix=f"_{d}")
+        feats = feats.dropna(axis=1)
+        feats = StandardScaler().fit_transform(feats.values)
+        feats = VarianceThreshold().fit_transform(feats)
+        return pd.DataFrame(feats, columns=list(range(feats.shape[1])))
+    
+    def _extract_features_univariate(self, data: List[np.ndarray]) -> pd.DataFrame:
         trans = self._transform_format(data)
         feats = extract_features(
             trans,
             n_jobs=self.n_jobs,
             column_id="id",
             column_sort="time",
-            column_kind=None,
             column_value="value",
             default_fc_parameters=FilteredFCParameters(data),
             disable_progressbar=not self.verbose,
         )
         assert isinstance(feats, pd.DataFrame), "Features must be a DataFrame"
-        feats = feats.dropna(axis=1)
-        feats = StandardScaler().fit_transform(feats.values)
-        feats = VarianceThreshold().fit_transform(feats)
-        return pd.DataFrame(feats, columns=list(range(feats.shape[1])))
+        return feats
 
     def _transform_format(self, X: List[np.ndarray]) -> dict:
-        return {
-            "value-0": pd.DataFrame(
+        return pd.DataFrame(
                 [
                     {"id": j, "time": i, "value": x_i}
                     for j, x in enumerate(X)
                     for i, x_i in enumerate(x)
                 ]
             )
-        }
+    
+    def _validate_input(self, X: List[np.ndarray]) -> List[np.ndarray]:
+        assert len(X) > 0, "X must not be empty"
+        if len(X[0].shape) != 2:
+            warnings.warn("X must be a list of 2D arrays (n_samples, n_features). Reshaping to (n_samples, 1)")
+            X = [x.reshape(-1, 1) for x in X]
+        return X
+        
 
 
 class FilteredFCParameters(dict):
@@ -286,3 +303,9 @@ class FilteredFCParameters(dict):
         values = np.sort(np.concatenate(data))
         grid = np.linspace(values[0], values[-1], n)
         return grid.tolist()
+
+
+if __name__ == "__main__":
+    fe = FeatureEncoder()
+    feats = fe.fit_transform([np.random.rand(100) for _ in range(100)])
+    print(feats.shape)
